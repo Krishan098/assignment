@@ -58,7 +58,7 @@ def load_transactions(file_path:str)->pd.DataFrame:
         df=df[df['wallet'].notna() & (df['wallet']!='')]
         df=df[df['timestamp'].notna()]
         df=df[df['amount']>0]
-        #print(df)
+        #print(len(df))
         #print(df.columns)
         #print(df.describe)
         return df
@@ -67,12 +67,13 @@ def load_transactions(file_path:str)->pd.DataFrame:
         return pd.DataFrame()
 
 
-path= 'user-wallet-transactions.json'
-transaction_df=load_transactions(path)
+# path= 'user-wallet-transactions.json'
+# transaction_df=load_transactions(path)
 
 
 def feature_engineering(df:pd.DataFrame)->pd.DataFrame:
     '''Feature engineering'''
+    print('Performing feature engineering')
     feature=[]
     for wallet in df['wallet'].unique():
         wallet_df=df[df['wallet']==wallet].copy()
@@ -178,10 +179,152 @@ def feature_engineering(df:pd.DataFrame)->pd.DataFrame:
     feature_df=pd.DataFrame(feature)
     numeric_column=feature_df.select_dtypes(include=[np.number]).columns
     feature_df[numeric_column]=feature_df[numeric_column].fillna(0)
+    #print(len(feature_df))
     # print(f"Engineered {len(feature_df.columns)-1} features for {len(feature_df)} wallets")
     # print('features:',feature_df)
     # print('head:',feature_df.head())
     # print('describe:',feature_df.describe)
     return feature_df
-feature_df=feature_engineering(transaction_df)
 
+#feature_df=feature_engineering(transaction_df)
+
+
+from sklearn.ensemble import RandomForestRegressor,IsolationForest,RandomForestClassifier,GradientBoostingClassifier
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler,MinMaxScaler,LabelEncoder
+from sklearn.decomposition import PCA
+from sklearn.model_selection import train_test_split,cross_val_score
+from sklearn.metrics import silhouette_score,classification_report
+from sklearn.pipeline import Pipeline
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+
+
+def create_ml_scores(feature_df: pd.DataFrame) -> pd.DataFrame:
+    """Create credit scores"""
+    print("Creating credit scores...")
+    
+    # Prepare features
+    feature_cols = [col for col in feature_df.columns if col != 'wallet']
+    X = feature_df[feature_cols].values
+    scaler=StandardScaler()
+    # Normalize features
+    X_scaled = scaler.fit_transform(X)
+    
+    # Dimensionality reduction
+    pca=PCA(n_components=0.95)
+    X_pca = pca.fit_transform(X_scaled)
+    
+    # Cluster analysis to find behavioral groups
+    clustering_model=KMeans(n_clusters=5,random_state=42)
+    cluster_labels = clustering_model.fit_predict(X_pca)
+    
+    # Anomaly detection for risk assessment
+    anomaly_detector=IsolationForest(contamination=0.1,random_state=42)
+    
+    anomaly_scores = anomaly_detector.fit_predict(X_scaled)
+    anomaly_scores_continuous = anomaly_detector.decision_function(X_scaled)
+    
+    # composite behavioral score
+    behavioral_scores = []
+    
+    for i in range(len(feature_df)):
+        # Base score from cluster (0-600 range)
+        cluster = cluster_labels[i]
+        cluster_means = []
+        for c in range(clustering_model.n_clusters):
+            cluster_mask = cluster_labels == c
+            if cluster_mask.sum() > 0:
+                # Calculate cluster quality metrics
+                cluster_data = X_pca[cluster_mask]
+                cluster_center = clustering_model.cluster_centers_[c]
+                
+                # Distance from cluster center (lower = more typical)
+                distances = np.linalg.norm(cluster_data - cluster_center, axis=1)
+                avg_distance = distances.mean()
+                
+                # Volume and consistency indicators
+                volume_score = feature_df.iloc[cluster_mask]['total_volume_usd'].mean()
+                consistency_score = 1 / (1 + feature_df.iloc[cluster_mask]['time_regularity'].mean())
+                
+                cluster_score = (volume_score * 0.4 + consistency_score * 0.6) / avg_distance
+                cluster_means.append(cluster_score)
+            else:
+                cluster_means.append(0)
+        
+        # Normalize cluster scores and assign
+        if len(cluster_means) > 0:
+            cluster_scores_norm = MinMaxScaler(feature_range=(200, 600)).fit_transform(
+                np.array(cluster_means).reshape(-1, 1)
+            ).flatten()
+            base_score = cluster_scores_norm[cluster]
+        else:
+            base_score = 400
+        
+        # Risk adjustment from anomaly detection (-200 to +200)
+        anomaly_adjustment = (anomaly_scores_continuous[i] + 0.5) * 200  # Normalize roughly to -200,+200
+        risk_penalty = 0 if anomaly_scores[i] == 1 else -100  # Penalty for anomalies
+        
+        # Behavioral bonuses/penalties
+        row = feature_df.iloc[i]
+        
+        behavioral_bonus = 0
+        # Positive behaviors
+        if row['is_lender'] and row['borrow_repay_balance'] > 0:
+            behavioral_bonus += 100
+        if row['coin_preference'] > 0.5:
+            behavioral_bonus += 50
+        if row['asset_entropy'] > 1.0:  
+            behavioral_bonus += 30
+        
+        # Negative behaviors
+        if row['liquidation_ratio'] > 0:
+            behavioral_bonus -= 200
+        if row['round_amount_ratio'] > 0.5:
+            behavioral_bonus -= 100
+        if row['burst_activity_ratio'] > 0.8:
+            behavioral_bonus -= 150
+        
+        # Final score
+        final_score = base_score + anomaly_adjustment + risk_penalty + behavioral_bonus
+        final_score = max(0, min(1000, final_score))  
+        
+        behavioral_scores.append(final_score)
+    
+    feature_df['credit_score'] = behavioral_scores
+    
+    # Store feature importance from PCA
+    feature_importance = dict(zip(feature_cols, np.abs(pca.components_[0])))
+    feature_importance = dict(sorted(feature_importance.items(), key=lambda x: x[1], reverse=True))
+    # for k, v in list(feature_importance.items())[:10]:
+    #     print(f"{k}: {v:.4f}")
+    return feature_df
+
+
+#create_ml_scores(feature_df)
+
+
+def categorize_score(self, score: float) -> str:
+    """Categorize credit score into risk levels."""
+    if score >= 800:
+        return 'Excellent'
+    elif score >= 650:
+        return 'Good'
+    elif score >= 500:
+        return 'Fair'
+    elif score >= 350:
+        return 'Poor'
+    else:
+        return 'Very Poor'
+
+def generate_results(feature_df:pd.DataFrame)->pd.DataFrame:
+    '''Final results'''
+    results=feature_df[['wallet','credit_score']].copy()
+    results['credit_score']=results['credit_score'].round().astype(int)
+    results['score_category']=results['credit_score'].apply(categorize_score)
+    results['is_borrower']=feature_df['is_borrower']
+    results['is_lender']=feature_df['is_lender']
+    results['total_volume_usd']=feature_df['total_volume_usd'].round(2)
+    results['days_active']=feature_df['days_active']
+    results['liquidation_ratio']=feature_df['liquidation_ratio'].round(4)
+    return results.sort_values('credit_score',ascending=False)
