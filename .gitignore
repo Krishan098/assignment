@@ -205,4 +205,7 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
-/testing.ipynb
+/first/testing.ipynb
+/second/testint.ipynb
+/second/wallet_scores_detailed.csv
+/second/extracted_data_summary.csv
